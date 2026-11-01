@@ -1,0 +1,13 @@
+{
+  "password": "Ga4Test!c27b11",
+  "admin": {
+    "email": "ga4test.admin.610831@example.test",
+    "phone": "096108310001",
+    "id": "412d5688-5fe9-421f-9de8-66396caecedd"
+  },
+  "tenant": {
+    "email": "ga4test.tenant.610831@example.test",
+    "phone": "096108310002",
+    "id": "a710edf9-3294-4dd8-979f-207a51efdb33"
+  }
+}
