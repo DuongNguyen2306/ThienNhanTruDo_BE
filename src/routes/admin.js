@@ -5,6 +5,8 @@ const revenueHelper = require('../helpers/revenueHelper');
 const reviewHelper = require('../helpers/websiteReviewHelper');
 const internalStore = require('../helpers/internalStore');
 const ga4Service = require('../services/ga4Service');
+const ga4SyncService = require('../services/ga4SyncService');
+const trafficService = require('../services/trafficService');
 
 const router = express.Router();
 
@@ -1292,31 +1294,98 @@ router.get('/reviews/stats', async (req, res, next) => {
 
 // ============================================
 // GET /api/admin/analytics/traffic
-// Website traffic by acquisition source, read live from the GA4 Data API.
-// Chỉ Admin được truy cập (đã áp dụng ở đầu router).
+// Website traffic by acquisition source, read from our OWN MongoDB store
+// (collection `traffic_visits`) — NOT from the GA4 Data API.
+//
+// Lý do đổi:
+//  • GA4 `sessionSourceMedium` không phản ánh đúng nguồn: các lượt vào từ
+//    Facebook/Threads bằng link UTM vẫn bị GA4 gán là `(direct) / (none)`,
+//    và tổng sessions của GA4 không khớp tổng các nhóm nguồn (do hàng
+//    `(not set)` trong dữ liệu intraday).
+//  • GA4 Realtime chỉ giữ 30 phút; dữ liệu tự ghi thì tích luỹ.
+//
+// Chỉ Admin được truy cập (đã áp dụng `authorize('admin')` ở đầu router).
 // ============================================
 router.get('/analytics/traffic', async (req, res, next) => {
   try {
     const { period = '7d' } = req.query;
+    // `includeLocal=1` ⇒ tính cả lượt truy cập từ localhost/dev-test.
+    // Mặc định CHỈ tính lượt từ domain thật.
+    const includeLocal = req.query.includeLocal === '1';
 
+    const report = await trafficService.getTrafficStats(period, { includeLocal });
+
+    res.json(report);
+  } catch (error) {
+    console.error('[admin/analytics/traffic]', error.message);
+    res.status(500).json({
+      error: error.message || 'Không đọc được dữ liệu lượt truy cập.',
+      code: 'TRAFFIC_ERROR',
+    });
+  }
+});
+
+// ============================================
+// GET /api/admin/analytics/ga4
+// Số SESSIONS theo nguồn từ GA4 Data API — đã ĐỒNG BỘ vào MongoDB.
+//
+// NGUỒN: dimension `sessionSourceMedium` + metric `sessions` của GA4.
+//   • Facebook và Threads được tách RIÊNG từ sessionSourceMedium
+//     (KHÔNG lấy từ nhóm tổng hợp `sessionDefaultChannelGroup` = Organic
+//     Social, vì nhóm đó gộp cả Facebook lẫn Threads lẫn Instagram).
+//   • Mọi nguồn còn lại → "Trực tiếp / Khác".
+//
+// Dữ liệu đọc từ collection `ga4_traffic_daily` (đã upsert theo ngày+nguồn)
+// ⇒ không tốn quota GA4 mỗi lần mở trang.
+//
+// Query:
+//   period = today | 7d | 30d | all
+// ============================================
+router.get('/analytics/ga4', async (req, res, next) => {
+  try {
+    const { period = '7d' } = req.query;
+    const report = await ga4SyncService.getSyncedReport(period);
+    res.json(report);
+  } catch (error) {
+    console.error('[admin/analytics/ga4]', error.message);
+    res.status(500).json({
+      error: error.message || 'Không đọc được số liệu GA4.',
+      code: 'GA4_SYNC_ERROR',
+    });
+  }
+});
+
+// ============================================
+// POST /api/admin/analytics/ga4/sync
+// Đồng bộ số liệu GA4 → MongoDB bằng UPSERT (chống trùng).
+//
+// Body: { days?: number }  (mặc định 90, tối đa 400)
+//
+// Chạy lại nhiều lần KHÔNG nhân đôi số liệu: upsert theo (date, source).
+// ============================================
+router.post('/analytics/ga4/sync', async (req, res, next) => {
+  try {
     if (!ga4Service.isConfigured()) {
       return res.status(503).json({
         error:
-          'Tính năng thống kê truy cập chưa được cấu hình (thiếu GA4_PROPERTY_ID hoặc thông tin xác thực Google).',
+          'GA4 chưa được cấu hình (thiếu GA4_PROPERTY_ID hoặc thông tin xác thực Google).',
         code: 'GA4_NOT_CONFIGURED',
       });
     }
 
-    const report = await ga4Service.getTrafficReport(period);
+    const days = req.body?.days ? Number(req.body.days) : undefined;
+    const result = await ga4SyncService.syncFromGa4({ days });
 
-    res.json(report);
+    res.json({
+      success: true,
+      ...result,
+      message: `Đã đồng bộ ${result.synced} bản ghi từ GA4 (${result.days} ngày gần nhất).`,
+    });
   } catch (error) {
-    // Lỗi GA4 đã được chuẩn hoá thành thông điệp thân thiện, không kèm
-    // bất kỳ thông tin credential nào.
-    console.error('[admin/analytics/traffic]', error.message);
-    res.status(502).json({
-      error: error.message || 'Không đọc được dữ liệu từ Google Analytics.',
-      code: 'GA4_ERROR',
+    console.error('[admin/analytics/ga4/sync]', error.message);
+    res.status(500).json({
+      error: error.message || 'Không đồng bộ được số liệu GA4.',
+      code: 'GA4_SYNC_ERROR',
     });
   }
 });
